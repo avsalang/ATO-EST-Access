@@ -6,6 +6,7 @@
 # - MapLibre basemap using supplied style JSON
 # - Auto-zoom to selected region
 # - Professional floating continuous colorbar legend inside map
+# - Population-group inequality section for BOTH healthcare and schools
 #
 # Run:
 #   streamlit run heigit_dashboard.py
@@ -22,7 +23,6 @@ import requests
 import pandas as pd
 import numpy as np
 import streamlit as st
-import streamlit.components.v1 as components
 import plotly.express as px
 
 st.set_page_config(page_title="Asia-Pacific Access Dashboard", layout="wide")
@@ -61,7 +61,7 @@ HOSP_OPTIONS = {
     "30 min": ("pop_30min_hospital_pop", "pop_30min_hospital_share"),
     "60 min": ("pop_60min_hospital_pop", "pop_60min_hospital_share"),
     "90 min": ("pop_90min_hospital_pop", "pop_90min_hospital_share"),
-    "110 min": ("pop_110min_hospital_pop", "pop_110min_hospital_share"),
+    "120 min": ("pop_120min_hospital_pop", "pop_120min_hospital_share"),
 }
 
 SCHOOL_OPTIONS = {
@@ -74,7 +74,7 @@ SCHOOL_OPTIONS = {
 HOSP_GAP_OPTIONS = {
     ">60 min": ("pop_beyond_60min_hospital_pop", "pop_beyond_60min_hospital_share"),
     ">90 min": ("pop_>90min_hospital_pop", "pop_>90min_hospital_share"),
-    ">110 min": ("pop_>120min_hospital_pop", "pop_>120min_hospital_share"),
+    ">120 min": ("pop_>120min_hospital_pop", "pop_>120min_hospital_share"),
 }
 
 SCHOOL_GAP_FROM_WITHIN = {
@@ -83,10 +83,15 @@ SCHOOL_GAP_FROM_WITHIN = {
     ">50 km": "pop_50km_school_share",
 }
 
-DEMOGRAPHIC_OPTIONS = {
+HEALTH_DEMOGRAPHIC_OPTIONS = {
     "Children under 5": ("under5_gap_60min_hospital_pop", "under5_gap_60min_hospital_share"),
     "Women of childbearing age": ("women_childbearing_gap_60min_hospital_pop", "women_childbearing_gap_60min_hospital_share"),
     "Elderly population": ("elderly_gap_60min_hospital_pop", "elderly_gap_60min_hospital_share"),
+}
+
+SCHOOL_DEMOGRAPHIC_OPTIONS = {
+    "Total population": ("pop_gap_10km_school_pop", "pop_gap_10km_school_share"),
+    "School-age population": ("school_age_gap_10km_school_pop", "school_age_gap_10km_school_share"),
 }
 
 # ----------------------------------------------------
@@ -246,6 +251,22 @@ def get_region_geojson(geojson, iso_set):
     return {"type": "FeatureCollection", "features": features}
 
 
+def extract_coords_from_geometry(geom):
+    coords = []
+
+    def walk(x):
+        if isinstance(x, (list, tuple)):
+            if len(x) >= 2 and isinstance(x[0], (int, float)) and isinstance(x[1], (int, float)):
+                coords.append((float(x[0]), float(x[1])))
+            else:
+                for item in x:
+                    walk(item)
+
+    if geom and "coordinates" in geom:
+        walk(geom["coordinates"])
+    return coords
+
+
 def compute_feature_centroid(geom):
     coords = extract_coords_from_geometry(geom)
     if not coords:
@@ -280,22 +301,6 @@ def extract_bubble_points(geojson_data):
             "latitude": lat,
         })
     return pd.DataFrame(rows)
-
-
-def extract_coords_from_geometry(geom):
-    coords = []
-
-    def walk(x):
-        if isinstance(x, (list, tuple)):
-            if len(x) >= 2 and isinstance(x[0], (int, float)) and isinstance(x[1], (int, float)):
-                coords.append((float(x[0]), float(x[1])))
-            else:
-                for item in x:
-                    walk(item)
-
-    if geom and "coordinates" in geom:
-        walk(geom["coordinates"])
-    return coords
 
 
 def compute_view_state_from_geojson(geojson, default_lat=15, default_lon=105, default_zoom=2.2):
@@ -401,8 +406,8 @@ def render_maplibre_map(style_url, style_dict, geojson_data, view_state, legend_
         marker_line_color="rgba(255,255,255,0.40)",
         marker_line_width=0.5,
         hovertemplate=(
-            "<b>%{customdata[0]}</b><br>" +
-            "ISO3: %{customdata[1]}<br>" +
+            "<b>%{customdata[0]}</b><br>"
+            "ISO3: %{customdata[1]}<br>"
             "Share with access: %{customdata[2]:.1f}%<extra></extra>"
         ),
         selector=dict(type="choropleth"),
@@ -477,8 +482,8 @@ def render_bubble_map(geojson_data, view_state, legend_min, legend_max, height=6
     fig.update_traces(
         marker=dict(line=dict(color="rgba(255,255,255,0.75)", width=0.8), opacity=0.85),
         hovertemplate=(
-            "<b>%{hovertext}</b><br>" +
-            "ISO3: %{customdata[0]}<br>" +
+            "<b>%{hovertext}</b><br>"
+            "ISO3: %{customdata[0]}<br>"
             "Share with access: %{marker.color:.1f}%<extra></extra>"
         )
     )
@@ -559,7 +564,9 @@ st.title("Access to Essential Services in Asia-Pacific")
 st.caption(
     "Dashboard summarizing accessibility to hospitals and schools, "
     "including geographic distribution, rankings, regional comparisons, "
-    "accessibility gaps, and demographic inequalities. Compiled from HeiGIT Accessibility Indicators (https://giscience.github.io/open-access-lens/)"
+    "accessibility gaps, and demographic inequalities. "
+    "Compiled from HeiGIT Accessibility Indicators "
+    "(https://giscience.github.io/open-access-lens/)"
 )
 
 # ----------------------------------------------------
@@ -754,10 +761,12 @@ if gap_service == "Hospital":
     gap_thr = st.selectbox("Threshold", list(HOSP_GAP_OPTIONS.keys()))
     _, gap_share_col = HOSP_GAP_OPTIONS[gap_thr]
     gap_df["gap_share"] = pd.to_numeric(df.get(gap_share_col), errors="coerce")
+    gap_x_title = "Population beyond threshold (%)"
 else:
     gap_thr = st.selectbox("Threshold", list(SCHOOL_GAP_FROM_WITHIN.keys()))
     within = pd.to_numeric(df.get(SCHOOL_GAP_FROM_WITHIN[gap_thr]), errors="coerce")
     gap_df["gap_share"] = 1 - within
+    gap_x_title = "Population beyond threshold (%)"
 
 gap_df = gap_df.dropna(subset=["gap_share"]).sort_values("gap_share", ascending=False).copy()
 gap_df["gap_pct"] = gap_df["gap_share"] * 100
@@ -773,7 +782,7 @@ fig_gap = px.bar(
 fig_gap.update_layout(
     height=plot_height_for_n(len(gap_df)),
     yaxis={"categoryorder": "total ascending"},
-    xaxis_title="Population beyond threshold (%)",
+    xaxis_title=gap_x_title,
     yaxis_title="",
     template="plotly_white",
     margin=dict(l=10, r=10, t=30, b=10)
@@ -785,34 +794,85 @@ st.plotly_chart(fig_gap, use_container_width=True)
 st.divider()
 
 # ----------------------------------------------------
-# DEMOGRAPHIC INEQUALITY
+# POPULATION GROUP INEQUALITY
 # ----------------------------------------------------
-st.subheader("Healthcare access inequality across population groups")
+st.subheader("Population group inequality")
 
-demo_group = st.selectbox("Population group", list(DEMOGRAPHIC_OPTIONS.keys()))
+ineq_service = st.selectbox("Inequality service", ["Healthcare", "Schools"])
 
-pop_col_demo, share_col_demo = DEMOGRAPHIC_OPTIONS[demo_group]
+if ineq_service == "Healthcare":
+    demo_group = st.selectbox("Population group", list(HEALTH_DEMOGRAPHIC_OPTIONS.keys()))
+    pop_col_demo, share_col_demo = HEALTH_DEMOGRAPHIC_OPTIONS[demo_group]
+    section_title = f"{demo_group} living more than 60 minutes from a hospital"
+    xaxis_title = "Population group beyond 60 minutes (%)"
+    caption_text = (
+        "This chart highlights inequality in healthcare accessibility across demographic groups. "
+        "Higher percentages indicate larger shares of vulnerable populations living far from hospitals."
+    )
+else:
+    demo_group = st.selectbox("Population group", list(SCHOOL_DEMOGRAPHIC_OPTIONS.keys()))
+    pop_col_demo, share_col_demo = SCHOOL_DEMOGRAPHIC_OPTIONS[demo_group]
+    section_title = f"{demo_group} living more than 10 km from a school"
+    xaxis_title = "Population group beyond 10 km (%)"
+    caption_text = (
+        "This chart highlights inequality in school accessibility across population groups. "
+        "The school-specific group available in the data is school-age population, benchmarked against the total population."
+    )
 
 demo_df = df[[ISO_COL]].copy()
 demo_df["gap_share"] = pd.to_numeric(df.get(share_col_demo), errors="coerce")
 demo_df["gap_pop"] = pd.to_numeric(df.get(pop_col_demo), errors="coerce")
 
+# ----------------------------------------------------
+# TOTAL POPULATION / GROUP TOTAL ESTIMATION
+# ----------------------------------------------------
+if ineq_service == "Schools" and demo_group == "Total population":
+    # Direct denominator available in the dataset
+    demo_df["group_total_pop"] = pd.to_numeric(df.get("edu_total_pop_est"), errors="coerce")
+else:
+    # Derive denominator from: gap_share = gap_pop / total_group_pop
+    demo_df["group_total_pop"] = np.where(
+        (demo_df["gap_share"] > 0) & demo_df["gap_pop"].notna(),
+        demo_df["gap_pop"] / demo_df["gap_share"],
+        np.nan
+    )
+
 demo_df = demo_df.dropna(subset=["gap_share"]).sort_values("gap_share", ascending=False).copy()
 demo_df["gap_pct"] = demo_df["gap_share"] * 100
 demo_avg_pct = safe_mean(demo_df["gap_share"]) * 100 if len(demo_df) else np.nan
+
+# Summary metrics
+group_total_sum = safe_sum(demo_df["group_total_pop"])
+gap_pop_sum = safe_sum(demo_df["gap_pop"])
+weighted_gap_share = gap_pop_sum / group_total_sum if group_total_sum > 0 else np.nan
+
+m1, m2, m3 = st.columns(3)
+m1.metric("Population group beyond threshold", fmt_int(gap_pop_sum))
+m2.metric("Estimated total population in group", fmt_int(group_total_sum))
+m3.metric("Weighted share beyond threshold", fmt_pct(weighted_gap_share))
 
 fig_demo = px.bar(
     demo_df,
     x="gap_pct",
     y=ISO_COL,
     orientation="h",
-    title=f"{demo_group} living more than 60 minutes from a hospital"
+    title=section_title,
+    custom_data=[ISO_COL, "gap_pop", "group_total_pop", "gap_pct"]
+)
+
+fig_demo.update_traces(
+    hovertemplate=(
+        "<b>%{customdata[0]}</b><br>"
+        "Beyond threshold: %{customdata[1]:,.0f}<br>"
+        "Total group population: %{customdata[2]:,.0f}<br>"
+        "Share beyond threshold: %{customdata[3]:.1f}%<extra></extra>"
+    )
 )
 
 fig_demo.update_layout(
     height=plot_height_for_n(len(demo_df)),
     yaxis={"categoryorder": "total ascending"},
-    xaxis_title="Population group beyond 60 minutes (%)",
+    xaxis_title=xaxis_title,
     yaxis_title="",
     template="plotly_white",
     margin=dict(l=10, r=10, t=50, b=10)
@@ -821,7 +881,11 @@ fig_demo.update_layout(
 fig_demo = add_regional_avg_line(fig_demo, demo_avg_pct)
 st.plotly_chart(fig_demo, use_container_width=True)
 
-st.caption(
-    "This chart highlights inequality in healthcare accessibility across demographic groups. "
-    "Higher percentages indicate larger shares of vulnerable populations living far from hospitals."
-)
+if ineq_service == "Schools" and demo_group == "Total population":
+    st.caption(
+        caption_text + " Total population values are taken directly from edu_total_pop_est."
+    )
+else:
+    st.caption(
+        caption_text + " Total population values shown here are estimated from the reported gap population and gap share."
+    )
