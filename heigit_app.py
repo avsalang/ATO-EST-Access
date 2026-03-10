@@ -24,6 +24,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="Asia-Pacific Access Dashboard", layout="wide")
 
@@ -527,6 +528,275 @@ def render_bubble_map(geojson_data, view_state, legend_min, legend_max, height=6
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
+def geometry_to_polygons(geom):
+    if not geom:
+        return []
+
+    geom_type = geom.get("type")
+    coords = geom.get("coordinates", [])
+
+    if geom_type == "Polygon":
+        return [coords]
+    if geom_type == "MultiPolygon":
+        return list(coords)
+    return []
+
+
+def point_in_ring(lon, lat, ring):
+    inside = False
+    n = len(ring)
+    if n < 3:
+        return False
+
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i][0], ring[i][1]
+        xj, yj = ring[j][0], ring[j][1]
+        intersects = ((yi > lat) != (yj > lat))
+        if intersects:
+            denom = (yj - yi)
+            if abs(denom) < 1e-12:
+                denom = 1e-12
+            x_cross = (xj - xi) * (lat - yi) / denom + xi
+            if lon < x_cross:
+                inside = not inside
+        j = i
+
+    return inside
+
+
+def point_in_polygon(lon, lat, polygon_rings):
+    if not polygon_rings:
+        return False
+
+    outer = polygon_rings[0]
+    if not point_in_ring(lon, lat, outer):
+        return False
+
+    for hole in polygon_rings[1:]:
+        if point_in_ring(lon, lat, hole):
+            return False
+
+    return True
+
+
+def polygon_bbox(polygon_rings):
+    coords = [pt for ring in polygon_rings for pt in ring if len(pt) >= 2]
+    if not coords:
+        return None
+
+    xs = [pt[0] for pt in coords if -180 <= pt[0] <= 180]
+    ys = [pt[1] for pt in coords if -90 <= pt[1] <= 90]
+    if not xs or not ys:
+        return None
+
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def compute_hex_spacing(view_state, feature_count):
+    zoom = float(view_state.get("zoom", 2.2))
+
+    if zoom <= 1.6:
+        spacing = 2.1
+    elif zoom <= 2.3:
+        spacing = 1.5
+    elif zoom <= 3.0:
+        spacing = 0.95
+    elif zoom <= 3.8:
+        spacing = 0.62
+    elif zoom <= 4.6:
+        spacing = 0.40
+    else:
+        spacing = 0.26
+
+    if feature_count >= 20:
+        spacing *= 1.06
+    elif feature_count <= 6:
+        spacing *= 0.76
+
+    return float(max(0.14, spacing))
+
+
+def make_hexagon_coordinates(lon, lat, spacing):
+    radius = spacing / np.sqrt(3)
+    coords = []
+    for angle_deg in [90, 150, 210, 270, 330, 30]:
+        angle = np.radians(angle_deg)
+        coords.append([
+            float(lon + radius * np.cos(angle)),
+            float(lat + radius * np.sin(angle)),
+        ])
+    return coords
+
+
+@st.cache_data(show_spinner=False)
+def build_hex_tile_points(geojson_data, spacing):
+    rows = []
+    dx = spacing
+    dy = spacing * 0.8660254037844386
+    country_shapes = []
+    overall_bbox = None
+
+    for feat in geojson_data.get("features", []):
+        props = feat.get("properties", {})
+        iso = props.get("country_code") or get_feature_iso(props)
+        value = props.get("value")
+        value_pct = props.get("value_pct")
+        if not iso or value is None or value_pct is None:
+            continue
+
+        polygons = geometry_to_polygons(feat.get("geometry", {}))
+        polygon_entries = []
+        for polygon_rings in polygons:
+            bbox = polygon_bbox(polygon_rings)
+            if not bbox:
+                continue
+            polygon_entries.append({"rings": polygon_rings, "bbox": bbox})
+
+            if overall_bbox is None:
+                overall_bbox = list(bbox)
+            else:
+                overall_bbox[0] = min(overall_bbox[0], bbox[0])
+                overall_bbox[1] = min(overall_bbox[1], bbox[1])
+                overall_bbox[2] = max(overall_bbox[2], bbox[2])
+                overall_bbox[3] = max(overall_bbox[3], bbox[3])
+
+        if polygon_entries:
+            country_shapes.append(
+                {
+                    "country_code": iso,
+                    "country_name": props.get("country_name") or iso,
+                    "value": float(value),
+                    "value_pct": float(value_pct),
+                    "polygons": polygon_entries,
+                }
+            )
+
+    if not country_shapes or overall_bbox is None:
+        return pd.DataFrame(rows)
+
+    minx, miny, maxx, maxy = overall_bbox
+    x0 = np.floor(minx / dx) * dx
+    y0 = np.floor(miny / dy) * dy
+    y = y0
+    row_idx = 0
+
+    while y <= maxy + dy:
+        x_offset = dx / 2 if row_idx % 2 else 0.0
+        x = x0 + x_offset
+        while x <= maxx + dx:
+            for country in country_shapes:
+                for polygon in country["polygons"]:
+                    bx0, by0, bx1, by1 = polygon["bbox"]
+                    if x < bx0 or x > bx1 or y < by0 or y > by1:
+                        continue
+                    if point_in_polygon(x, y, polygon["rings"]):
+                        rows.append(
+                            {
+                                "country_code": country["country_code"],
+                                "country_name": country["country_name"],
+                                "value": country["value"],
+                                "value_pct": country["value_pct"],
+                                "longitude": float(x),
+                                "latitude": float(y),
+                            }
+                        )
+                        break
+                else:
+                    continue
+                break
+            x += dx
+        y += dy
+        row_idx += 1
+
+    return pd.DataFrame(rows)
+
+
+def render_hex_map(style_url, geojson_data, view_state, legend_min, legend_max, height=620):
+    feature_count = sum(
+        1
+        for feat in geojson_data.get("features", [])
+        if feat.get("properties", {}).get("value") is not None
+    )
+    spacing = compute_hex_spacing(view_state, feature_count)
+    hex_df = build_hex_tile_points(geojson_data, spacing)
+    if hex_df.empty:
+        st.info("No map data available for the current filters.")
+        return
+
+    colorscale = [
+        [0.00, "#440154"],
+        [0.25, "#3b528b"],
+        [0.50, "#21918c"],
+        [0.75, "#5ec962"],
+        [1.00, "#fde725"],
+    ]
+    zoom = float(view_state.get("zoom", 2.2))
+    marker_size = max(6.0, 34.0 - (spacing * 11.0) + (zoom * 1.35))
+
+    fig = go.Figure(
+        go.Scattergeo(
+            lon=hex_df["longitude"],
+            lat=hex_df["latitude"],
+            mode="markers",
+            customdata=hex_df[["country_name", "country_code", "value_pct"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "ISO3: %{customdata[1]}<br>"
+                "Share with access: %{customdata[2]:.1f}%<extra></extra>"
+            ),
+            marker=dict(
+                symbol="hexagon",
+                sizemode="diameter",
+                size=marker_size,
+                color=hex_df["value_pct"],
+                cmin=legend_min,
+                cmax=legend_max,
+                colorscale=colorscale,
+                line=dict(color="rgba(120,120,120,0.28)", width=0.4),
+                opacity=0.96,
+                colorbar=dict(
+                    title="Share with access (%)",
+                    thickness=18,
+                    len=0.28,
+                    x=0.985,
+                    xanchor="right",
+                    y=0.5,
+                    yanchor="middle",
+                    bgcolor="rgba(255,255,255,0.96)",
+                    outlinecolor="#d0d0d0",
+                    outlinewidth=1,
+                    tickformat=".1f",
+                ),
+            ),
+        )
+    )
+
+    fig.update_geos(
+        visible=False,
+        showcountries=False,
+        showcoastlines=True,
+        coastlinecolor="rgba(20,20,20,0.28)",
+        coastlinewidth=0.6,
+        showland=True,
+        landcolor="rgb(248,248,246)",
+        showocean=True,
+        oceancolor="rgb(235,242,248)",
+        showframe=False,
+        fitbounds="locations",
+        projection_type="natural earth",
+        center={"lat": view_state.get("latitude", 15), "lon": view_state.get("longitude", 105)},
+    )
+
+    fig.update_layout(
+        height=height,
+        margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
 # ----------------------------------------------------
 # FILE CHECKS
 # ----------------------------------------------------
@@ -603,7 +873,7 @@ with c3:
 with c4:
     map_view = st.radio(
         "Map view",
-        ["Choropleth", "Bubble map"],
+        ["Hex map", "Choropleth", "Bubble map"],
         horizontal=True
     )
     show_mode = st.radio(
@@ -691,7 +961,16 @@ if abs(legend_max - legend_min) < 1e-9:
     legend_min = max(0.0, legend_min - 5)
     legend_max = min(100.0, legend_max + 5)
 
-if map_view == "Bubble map":
+if map_view == "Hex map":
+    render_hex_map(
+        style_url=STYLE_URL,
+        geojson_data=geojson_for_map,
+        view_state=view_state,
+        legend_min=legend_min,
+        legend_max=legend_max,
+        height=MAP_HEIGHT,
+    )
+elif map_view == "Bubble map":
     render_bubble_map(
         geojson_data=geojson_for_map,
         view_state=view_state,
