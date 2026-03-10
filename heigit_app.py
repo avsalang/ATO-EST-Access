@@ -295,7 +295,7 @@ st.title("Access to Essential Services in Asia-Pacific")
 st.caption(
     "Dashboard summarizing accessibility to hospitals and schools, "
     "including geographic distribution, rankings, regional comparisons, "
-    "accessibility gaps, and demographic inequalities."
+    "accessibility gaps, and demographic inequalities. Compiled from HeiGIT Accessibility Indicators (https://giscience.github.io/open-access-lens/)"
 )
 
 # ----------------------------------------------------
